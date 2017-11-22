@@ -41,6 +41,7 @@ from six.moves.urllib.parse import urlencode
 
 from sentry import auth
 from sentry.auth.providers.dummy import DummyProvider
+from sentry.auth.superuser import Superuser
 from sentry.constants import MODULE_ROOT
 from sentry.models import GroupMeta, ProjectOption
 from sentry.plugins import plugins
@@ -108,13 +109,22 @@ class BaseTestCase(Fixtures, Exam):
         self.client.cookies[session_cookie] = self.session.session_key
         self.client.cookies[session_cookie].update(cookie_data)
 
-    def make_request(self, user=None):
+    def make_request(self, user=None, auth=None, method=None):
         request = HttpRequest()
+        if method:
+            request.method = method
+        request.META['REMOTE_ADDR'] = '127.0.0.1'
+        # order matters here, session -> user -> other things
         request.session = self.session
+        request.auth = auth
         request.user = user or AnonymousUser()
+        request.superuser = Superuser(request)
+        request.is_superuser = lambda: request.superuser.is_active
         return request
 
-    def login_as(self, user, organization_id=None):
+    # TODO(dcramer): we want to make the default behavior be ``superuser=False``
+    # but for compatibility reasons we need to update other projects first
+    def login_as(self, user, organization_id=None, superuser=True):
         user.backend = settings.AUTHENTICATION_BACKENDS[0]
 
         request = self.make_request()
@@ -122,7 +132,13 @@ class BaseTestCase(Fixtures, Exam):
         request.user = user
         if organization_id:
             request.session[SSO_SESSION_KEY] = six.text_type(organization_id)
-
+        # logging in implicitly binds superuser, but for test cases we
+        # want that action to be explicit to avoid accidentally testing
+        # superuser-only code
+        if not superuser:
+            request.superuser.set_logged_out()
+        elif request.user.is_superuser and superuser:
+            request.superuser.set_logged_in(request.user)
         # Save the session values.
         self.save_session()
 
